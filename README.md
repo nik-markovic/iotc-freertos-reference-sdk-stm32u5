@@ -1,105 +1,63 @@
 # About
 
-This repository contains the IoTConnect SDK for Amazon FreeRTOS.
-
-The SDK should support all boards supported by Amazon FreeRTOS, but it has been tested only with:
-- Windows PC Simulator (CMake and Visual Studio setup)
-- Microchip ATECC608A Secure Element with Windows Simulator (CMake)
+This repository contains the IoTConnect SDK for FreeRTOS STM32U5 reference project.
 
 ### Build Instructions
 
-- Clone the Amazon FreeRTOS repo.
-- Clone this repo into the libraries/3rdparty directory of the Amazon FreeRTOS repo ensuring that submodules are pulled also:
+- Clone the FreeRTOS reference project and this project:
+```shell
+git clone https://github.com/FreeRTOS/iot-reference-stm32u5.git --recurse-submodules
+mkdir cd lab-iot-reference-stm32u5/Middleware/avnet
+cd lab-iot-reference-stm32u5/Middleware/avnet
+git clone https://github.com/avnet-iotconnect/iotc-freertos-reference-sdk-stm32u5.git --recurse-submodules
+```
+- Snure that HTTP dependencies are pulled (TODO)
 ```shell script
-git clone https://github.com/aws/amazon-freertos.git --recurse-submodules
+TODO
 ```
-- Follow the Amazon FreeRTOS instructions for your board to be able to run the demo. 
-For example, if running the PC simulator, you will need to set configNETWORK_INTERFACE_TO_USE in vendors/pc/boards/FreeRTOSConfig.h, 
-or if using WiFi on the device, ensure to set the SSID and password in aws_clientcredential.h 
-- Edit **demos/include/iot_demo_runner.h** 
-and replace *RunCoreMqttMutualAuthDemo* with *RunIotConnectDemo*:
-```c
-...
-#if defined( CONFIG_CORE_MQTT_MUTUAL_AUTH_DEMO_ENABLED )
-    #define DEMO_entryFUNCTION              RunIotConnectDemo
-    #if defined( democonfigMQTT_ECHO_TASK_STACK_SIZE )
-        #undef democonfigDEMO_STACKSIZE
-        #define democonfigDEMO_STACKSIZE    democonfigMQTT_ECHO_TASK_STACK_SIZE
-    #endif
-...
-```  
-- Edit **demos/include/aws_credential.h** and specify any value for clientcredentialIOT_THING_NAME. 
-This value is used in some setups as the DHCP host name, but it is not tied to the device name for the IoTConnection.
-```c
-#ifndef clientcredentialIOT_THING_NAME
-    #define clientcredentialIOT_THING_NAME    "foo"
+- Follow the original instructions in the FreeRTOS repo to bring up the project with STM32CubeIDE 
+- Link the iotc-freertos-reference-sdk-stm32u5:
+  - Navigate to Libraries directory in project explorer and right-click it.
+  - Select **New->Folder**
+  - Enter: *iotc-freertos-reference-sdk-stm32u5*
+  - Expand the ***Advanced>>*** section and select "Link to alternate location (Linked Folder)"
+  - Enter: *WORKSPACE_LOC/Middleware/avnet/iotc-freertos-reference-sdk-stm32u5*
+  - Click **Finish**
+
+
+#define METRICS_PLATFORM_NAME "poc-iotconnect-iothub-003-eu2.azure-devices.net/avtds-stm32u5/?api-version=2018-06-30"
+conf set thing_name avtds-stm32u5
+conf get thing_name
+conf commit
+reset
+mqtt_agent_task.c
+        pxCtx->xConnectInfo.pUserName = AWS_IOT_METRICS_STRING;
+        pxCtx->xConnectInfo.userNameLength = AWS_IOT_METRICS_STRING_LENGTH;
+
+
+x509crt.c OR mbedtls_transport.c
+const mbedtls_x509_crt_profile mbedtls_x509_crt_profile_default =
+{
+    /* Hashes from SHA-256 and above. Note that this selection
+     * should be aligned with ssl_preset_default_hashes in ssl_tls.c. */
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA256 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA384 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA512 ) |
+	MBEDTLS_X509_ID_FLAG( MBEDTLS_MD_SHA1 ), // added
+    0xFFFFFFF, /* Any PK alg    */
+#if defined(MBEDTLS_ECP_C)
+    /* Curves at or above 128-bit security level. Note that this selection
+     * should be aligned with ssl_preset_default_curves in ssl_tls.c. */
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_SECP256R1 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_SECP384R1 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_SECP521R1 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_BP256R1 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_BP384R1 ) |
+    MBEDTLS_X509_ID_FLAG( MBEDTLS_ECP_DP_BP512R1 ) |
+    0,
+#else
+    0,
 #endif
-```
-- Edit **demos/include/aws_credential_keys.h** per your device's credentials. 
-Make sure to not use keyJITR_DEVICE_CERTIFICATE_AUTHORITY_PEM - set it to NULL.
-If using a secure element, you may need to follow the AWS instructions, and understand 
-how to generate a certificate from a public key provided on the console during the first run.
-- Append to the list of includes in **demos/common/mqtt_demo_helpers/mqtt_demo_helpers.c**:
-```c
-...
-#include "iotconnect_sync.h"
-#include "iotconnect_certs.h"
-...
-```
-- Additionally, in **demos/common/mqtt_demo_helpersmqtt_demo_helpers.c**, locate sections below and replace the code in them with the following two snippets:
-```c
-...
-    /* Initialize information to connect to the MQTT broker. */
-    xServerInfo.pHostName = iotc_sync_get_iothub_host();
-    xServerInfo.hostNameLength = strlen(iotc_sync_get_iothub_host());
-    xServerInfo.port = democonfigMQTT_BROKER_PORT;
+    2048,
+};
 
-    /* Set the Secure Socket configurations. */
-    xSocketConfig.enableTls = true;
-    xSocketConfig.pRootCa = CERT_BALTIMORE_ROOT_CA;
-    xSocketConfig.rootCaSize = sizeof(CERT_BALTIMORE_ROOT_CA);
-...
-            /* The client identifier is used to uniquely identify this MQTT client to
-             * the MQTT broker. In a production device the identifier can be something
-             * unique, such as a device serial number. */
-            xConnectInfo.pClientIdentifier = iotc_sync_get_client_id();
-            xConnectInfo.clientIdentifierLength = ( uint16_t ) strlen(xConnectInfo.pClientIdentifier);
-
-            /* Use the metrics string as username to report the OS and MQTT client version
-             * metrics to AWS IoT. */
-            xConnectInfo.pUserName = iotc_sync_get_username();
-            xConnectInfo.userNameLength = (uint16_t)strlen(xConnectInfo.pUserName);
-...
-```
-- If not using CMake, ensure that all the files in libraries/iotc-amazon-freertos-sdk are 
-added appropriately to your project as headers/sources. You can see the list of source directories 
-and files that need to be compile and include paths in the [CmakeLists.txt](CmakeLists.txt) file in this directory.
-- If using CMake, follow the steps in the CMake section below.   
-
-### CMake Build Steps
-
-- You may wish to set BUILD_CLONE_SUBMODULES=OFF in your CMake build in order to speed speed up rebuilding.
-- Append this snippet to **libraries/3rdparty/CMakeLists.txt**:
-```cmake
-...
-if (EXISTS ${AFR_3RDPARTY_DIR}/iotc-amazon-freertos-sdk)
-    add_subdirectory(iotc-amazon-freertos-sdk)
-endif()
-...
-```
-- Append *3rdparty::iotc_amazon_freertos_sdk* to the list of dependencies
-in **demos/common/mqtt_demo_helpers/CMakeLists.txt**:
-```cmake
-...
-afr_module_dependencies(
-    ${AFR_CURRENT_MODULE}
-    PUBLIC
-        AFR::core_mqtt
-        AFR::transport_interface_secure_sockets
-        AFR::backoff_algorithm
-        AFR::pkcs11_helpers
-        3rdparty::iotc_amazon_freertos_sdk
-...
-)
-```
-- Build the the aws_demos target
