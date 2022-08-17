@@ -39,9 +39,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Include config as the first non-system header. */
-#include "app_config.h"
-
 
 /* Kernel includes. */
 #include "FreeRTOS.h"

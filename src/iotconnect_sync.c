@@ -229,7 +229,6 @@ int iotc_sync_obtain_response(void) {
     }
     printf("Sync response parsing successful.\r\n");
 
-    run_http_sync(IOTCONNECT_CPID, IOTCONNECT_DUID);
     return (sync_response ? EXIT_SUCCESS : EXIT_FAILURE);
 }
  

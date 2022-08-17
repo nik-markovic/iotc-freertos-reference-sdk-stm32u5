@@ -2,28 +2,21 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "iot_network.h"
+/* Kernel includes. */
+#include "FreeRTOS.h"
+#include "task.h"
+
+#include "mqtt_agent_tash.h"
 
 #include "iotconnect.h"
 #include "iotconnect_common.h"
+#include "iotconnect_sync.h"
 #include "app_config.h"
 
 #define APP_VERSION "00.01.00"
 
-static void on_connection_status(IotConnectConnectionStatus status) {
-    // Add your own status handling
-    switch (status) {
-        case IOTC_CS_MQTT_CONNECTED:
-            printf("IoTConnect Client Connected\n");
-            break;
-        case IOTC_CS_MQTT_DISCONNECTED:
-            printf("IoTConnect Client Disconnected\n");
-            break;
-        default:
-            printf("IoTConnect Client ERROR\n");
-            break;
-    }
-}
+#undef printf
+#define printf LogInfo
 
 static void command_status(IotclEventData data, bool status, const char *command_name, const char *message) {
     const char *ack = iotcl_create_ack_string_and_destroy_event(data, status, message);
@@ -98,7 +91,7 @@ static void on_ota(IotclEventData data) {
 }
 
 
-static void publish_telemetry() {
+void publish_telemetry() {
     IotclMessageHandle msg = iotcl_telemetry_create(iotconnect_sdk_get_lib_config());
 
     // Optional. The first time you create a data point, the current timestamp will be automatically added
@@ -114,51 +107,30 @@ static void publish_telemetry() {
     iotcl_destroy_serialized(str);
 }
 
-int iotconnect_app_main(void) {
+void iotconnect_app_main(void) {
 
     IotConnectClientConfig *config = iotconnect_sdk_init_and_get_config();
     config->cpid = IOTCONNECT_CPID;
     config->env = IOTCONNECT_ENV;
     config->duid = IOTCONNECT_DUID;
 
-    config->status_cb = on_connection_status;
     config->ota_cb = on_ota;
     config->cmd_cb = on_command;
 
+    vSleepUntilMQTTAgentReady();
 
-    // run a dozen connect/send/disconnect cycles with each cycle being about a minute
-    for (int j = 0; j < 10; j++) {
-        int ret = iotconnect_sdk_init();
-        if (0 != ret) {
-            fprintf(stderr, "IoTConnect exited with error code %d\n", ret);
-            return ret;
+    int ret = iotconnect_sdk_init();
+    if (0 != ret) {
+        fprintf(stderr, "IoTConnect exited with error code %d\n", ret);
+        while(true) {
+            vTaskDelay( pdMS_TO_TICKS( 10000 ) );
         }
-
-        // send 10 messages
-        for (int i = 0; iotconnect_sdk_is_connected() && i < 10; i++) {
-            publish_telemetry();
-            // repeat approximately evey ~5 seconds
-            for (int k = 0; k < 5; k++) {
-                iotconnect_sdk_loop(1000);
-            }
-        }
-        iotconnect_sdk_disconnect();
     }
 
-    return 0;
-}
 
-int RunIotConnectDemo( bool awsIotMqttMode,
-                               const char * pIdentifier,
-                               void * pNetworkServerInfo,
-                               void * pNetworkCredentialInfo,
-                               const IotNetworkInterface_t * pNetworkInterface )
-{
-    ( void ) awsIotMqttMode;
-    ( void ) pIdentifier;
-    ( void ) pNetworkServerInfo;
-    ( void ) pNetworkCredentialInfo;
-    ( void ) pNetworkInterface;
-
-    return iotconnect_app_main();
+    // run a dozen connect/send/disconnect cycles with each cycle being about a minute
+    while (true) {
+    	publish_telemetry();
+        vTaskDelay( pdMS_TO_TICKS( 1000 ) );
+    }
 }

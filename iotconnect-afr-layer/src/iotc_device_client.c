@@ -36,89 +36,204 @@
 
 
 
-#include <transport_interface.h>
+#include "core_mqtt.h"
+#include "core_mqtt_agent.h"
+#include "subscription_manager.h"
+#include "mqtt_agent_task.h"
 
 #include "iotconnect_sync.h"
 #include "iotc_device_client.h"
 
-/*-----------------------------------------------------------*/
-struct NetworkContext
-{
-    SecureSocketsTransportParams_t* pParams;
-};
+#define MQTT_PUBLISH_BLOCK_TIME_MS           ( 200 )
+#define MQTT_NOTIFY_IDX                      ( 1 )
+#define MQTT_PUBLISH_NOTIFICATION_WAIT_MS    ( 1000 )
+#define MQTT_PUBLISH_QOS                     ( MQTTQoS1 )
 
-static bool is_connected = false;
-static NetworkContext_t xNetworkContext = {0};
-static uint8_t ucSharedBuffer[1024];
-static MQTTContext_t xMqttContext = { 0 };
-static MQTTFixedBuffer_t xBuffer =
+
+/*-----------------------------------------------------------*/
+typedef struct MQTTAgentCommandContext
 {
-    .pBuffer = ucSharedBuffer,
-    .size = 1024
-};
+    /**
+     * @brief The handle of this task. It is used by callbacks to notify this task.
+     */
+    TaskHandle_t xShadowDeviceTaskHandle;
+
+    MQTTAgentHandle_t xAgentHandle;
+} ShadowDeviceCtx_t;
+
+
 static IotConnectC2dCallback c2d_msg_cb = NULL; // callback for inbound messages
-static IotConnectStatusCallback status_cb = NULL; // callback for connection connection_status
+static MQTTAgentHandle_t xAgentHandle = NULL;
+static bool is_initialized = false;
 
-/*-----------------------------------------------------------*/
-static void prvEventCallback(MQTTContext_t* pxMqttContext,
-    MQTTPacketInfo_t* pxPacketInfo,
-    MQTTDeserializedInfo_t* pxDeserializedInfo)
-{ 
-    uint16_t usPacketIdentifier;
+static void devicebound_event_callback( void * pvCtx, MQTTPublishInfo_t * pxPublishInfo ) {
 
-    (void)pxMqttContext;
+	(void)pvCtx;
 
-    assert(pxDeserializedInfo != NULL);
-    assert(pxMqttContext != NULL);
-    assert(pxPacketInfo != NULL);
+    configASSERT( pxPublishInfo != NULL );
+    configASSERT( pxPublishInfo->pPayload != NULL );
 
-    usPacketIdentifier = pxDeserializedInfo->packetIdentifier;
+    LogInfo( "Inbound message:%.*s.",
+              pxPublishInfo->payloadLength,
+              ( const char * ) pxPublishInfo->pPayload );
 
-    /* Handle incoming publish. The lower 4 bits of the publish packet
-     * type is used for the dup, QoS, and retain flags. Hence masking
-     * out the lower bits to check if the packet is publish. */
-    if ((pxPacketInfo->type & 0xF0U) == MQTT_PACKET_TYPE_PUBLISH)
+    if (c2d_msg_cb) {
+    	c2d_msg_cb(( const char * ) pxPublishInfo->pPayload, pxPublishInfo->payloadLength);
+    }
+
+}
+
+static bool subscribe_to_devicebound_topic() {
+    MQTTStatus_t xStatus = MQTTSuccess;
+
+    xStatus = MqttAgent_SubscribeSync( xAgentHandle,
+                                       iotc_sync_get_sub_topic(),
+                                       MQTTQoS1,
+                                       devicebound_event_callback,
+                                       NULL );
+
+    if( xStatus != MQTTSuccess )
     {
-        assert(pxDeserializedInfo->pPublishInfo != NULL);
-        if(c2d_msg_cb) {
-            c2d_msg_cb((unsigned char*) pxDeserializedInfo->pPublishInfo->pPayload,  pxDeserializedInfo->pPublishInfo->payloadLength);
+        LogError( "Failed to subscribe to topic: %s", iotc_sync_get_sub_topic());
+        return pdFALSE;
+    }
+
+    return pdTRUE;
+}
+
+static void prvPublishCommandCallback( MQTTAgentCommandContext_t * pxCommandContext,
+	MQTTAgentReturnInfo_t * pxReturnInfo
+	)
+{
+    TaskHandle_t xTaskHandle = ( TaskHandle_t ) pxCommandContext;
+
+    configASSERT( pxReturnInfo != NULL );
+
+    uint32_t ulNotifyValue = pxReturnInfo->returnCode;
+
+    if( xTaskHandle != NULL )
+    {
+        /* Send the context's ulNotificationValue as the notification value so
+         * the receiving task can check the value it set in the context matches
+         * the value it receives in the notification. */
+        ( void ) xTaskNotifyIndexed( xTaskHandle,
+                                     MQTT_NOTIFY_IDX,
+                                     ulNotifyValue,
+                                     eSetValueWithOverwrite );
+    }
+}
+
+
+static BaseType_t prvPublishAndWaitForAck(const char * pcTopic,
+	const void * pvPublishData,
+	size_t xPublishDataLen
+	)
+{
+    MQTTStatus_t xStatus;
+    size_t uxTopicLen = 0;
+
+    configASSERT( pcTopic != NULL );
+    configASSERT( pvPublishData != NULL );
+    configASSERT( xPublishDataLen > 0 );
+
+    uxTopicLen = strnlen( pcTopic, UINT16_MAX );
+
+    MQTTPublishInfo_t xPublishInfo =
+    {
+        .qos             = MQTT_PUBLISH_QOS,
+        .retain          = 0,
+        .dup             = 0,
+        .pTopicName      = pcTopic,
+        .topicNameLength = ( uint16_t ) uxTopicLen,
+        .pPayload        = pvPublishData,
+        .payloadLength   = xPublishDataLen
+    };
+
+    MQTTAgentCommandInfo_t xCommandParams =
+    {
+        .blockTimeMs                 = MQTT_PUBLISH_BLOCK_TIME_MS,
+        .cmdCompleteCallback         = prvPublishCommandCallback,
+        .pCmdCompleteCallbackContext = ( void * ) xTaskGetCurrentTaskHandle(),
+    };
+
+    if( xPublishInfo.qos > MQTTQoS0 )
+    {
+        xCommandParams.pCmdCompleteCallbackContext = ( void * ) xTaskGetCurrentTaskHandle();
+    }
+
+    /* Clear the notification index */
+    xTaskNotifyStateClearIndexed( NULL, MQTT_NOTIFY_IDX );
+
+
+    xStatus = MQTTAgent_Publish( xAgentHandle,
+                                 &xPublishInfo,
+                                 &xCommandParams );
+
+    if( xStatus == MQTTSuccess )
+    {
+        uint32_t ulNotifyValue = 0;
+        BaseType_t xResult = pdFALSE;
+
+        xResult = xTaskNotifyWaitIndexed( MQTT_NOTIFY_IDX,
+                                          0xFFFFFFFF,
+                                          0xFFFFFFFF,
+                                          &ulNotifyValue,
+                                          pdMS_TO_TICKS( MQTT_PUBLISH_NOTIFICATION_WAIT_MS ) );
+
+        if( xResult )
+        {
+            xStatus = ( MQTTStatus_t ) ulNotifyValue;
+
+            if( xStatus != MQTTSuccess )
+            {
+                LogError( "MQTT Agent returned error code: %d during publish operation.",
+                          xStatus );
+                xResult = pdFALSE;
+            }
+        }
+        else
+        {
+            LogError( "Timed out while waiting for publish ACK or Sent event. xTimeout = %d",
+                      pdMS_TO_TICKS( MQTT_PUBLISH_NOTIFICATION_WAIT_MS ) );
+            xResult = pdFALSE;
         }
     }
     else
     {
-        vHandleOtherIncomingPacket(pxPacketInfo, usPacketIdentifier);
+        LogError( "MQTTAgent_Publish returned error code: %d.", xStatus );
     }
+
+    return( xStatus == MQTTSuccess );
 }
 
 int iotc_device_client_disconnect() {
-    BaseType_t ret = DisconnectMqttSession(&xMqttContext, &xNetworkContext);
-    if (ret == pdFAIL) {
-        LogError(("Encountered a failure while trying to disconnect the MQTT session."));
-    }
-    is_connected = false;
-    return (ret == pdPASS ? EXIT_SUCCESS : EXIT_FAILURE);
+	LogError(("MQTT Disconnect is not supported at this time"));
+    return EXIT_FAILURE;
 }
 
 bool iotc_device_client_is_connected() {
-    return (xMqttContext.connectStatus == MQTTConnected);
+    return xIsMqttAgentConnected();
 }
 
 int iotc_device_client_send_message(const char* message) {
-    BaseType_t ret = PublishToTopic(
-        &xMqttContext,
-        iotc_sync_get_pub_topic(),
-        strlen(iotc_sync_get_pub_topic()),
-        message,
-        strlen(message)
-        );
+    BaseType_t xResult = pdFALSE;
 
-    bool connected = xMqttContext.connectStatus == MQTTConnected;
-    if (pdPASS != ret) {
-        LogError(("Failed to send message. Connection status: %s", message, connected ? "CONNECTED" : "DISCONNECTED"));
+    xResult = prvPublishAndWaitForAck(
+	   iotc_sync_get_pub_topic(),
+	   message,
+	   ( size_t ) strlen(message)
+	   );
+
+    if( xResult != pdPASS )
+    {
+        LogError( "Failed to publish message %s", message);
     }
-    return (ret == pdPASS ? EXIT_SUCCESS : EXIT_FAILURE);
+
+
+    return (xResult == pdPASS ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
+#if 0
 void iotc_device_client_loop(unsigned int timeout_ms) {
     BaseType_t ret = ProcessLoop(& xMqttContext, (uint32_t) timeout_ms);
     bool connected = xMqttContext.connectStatus == MQTTConnected;
@@ -132,59 +247,28 @@ void iotc_device_client_loop(unsigned int timeout_ms) {
         is_connected = false;
     }
 }
+#endif
 
 int iotc_device_client_init(IotConnectDeviceClientConfig* c) {
-    BaseType_t ret;
 
     c2d_msg_cb = NULL;
-    status_cb = NULL;
 
-    if (is_connected) {
-        ret = DisconnectMqttSession(&xMqttContext, &xNetworkContext);
-        if (ret == pdFAIL) {
-            LogError(("Failed to disconnect a stale MQTT session."));
-        }
+    if (is_initialized) {
+		LogWarn(("WARN: iotc_device_client_init should not be called twice. Disconnect is not supported, so initialization is partial..."));
     }
-    is_connected = false;
-    /* Remove compiler warnings about unused parameters. */
+    is_initialized = true;
 
-    ret = EstablishMqttSession(&xMqttContext,
-        &xNetworkContext,
-        &xBuffer,
-        prvEventCallback);
+    /* Wait for MqttAgent to be ready. */
+    vSleepUntilMQTTAgentReady();
 
-    if (ret == pdFAIL) {
-        /* Log error to indicate connection failure. */
-        LogError(("Failed to connect to MQTT broker."));
+    xAgentHandle = xGetMqttAgentHandle();
+
+    if (!subscribe_to_devicebound_topic()) {
+		LogWarn(("iotc_device_client_init: Unable to subscribe to devicebound messages topic."));
         return EXIT_FAILURE;
     }
-    LogInfo(("Connected to MQTT with EstablishMqttSession."));
-
-    ret = SubscribeToTopic(&xMqttContext,
-       iotc_sync_get_sub_topic(),
-       (uint16_t)strlen(iotc_sync_get_sub_topic())
-    );
-    if (pdPASS != ret) {
-        LogError(("Failed to subscribe to topic %s", iotc_sync_get_sub_topic()));
-    }
-    bool connected = false;
-    int tries = 0;
-    do {
-        connected = (xMqttContext.connectStatus == MQTTConnected);
-        ret = ProcessLoop(&xMqttContext, 100);
-        if (ret)
-        tries++;
-        if (tries >= 100) {
-            // 10 seconds
-            LogError(("Failed to connect"));
-            return EXIT_FAILURE;
-        }
-    } while (!connected);
-
-    is_connected = true;
 
     c2d_msg_cb = c->c2d_msg_cb;
-    status_cb = c->status_cb;
 
     return EXIT_SUCCESS;
 }
