@@ -7,8 +7,8 @@ This repository contains the IoTConnect SDK for FreeRTOS STM32U5 reference proje
 - Clone the FreeRTOS reference project and this project:
 ```shell
 git clone https://github.com/FreeRTOS/iot-reference-stm32u5.git --recurse-submodules
-mkdir cd lab-iot-reference-stm32u5/Middleware/avnet
-cd lab-iot-reference-stm32u5/Middleware/avnet
+mkdir -p iot-reference-stm32u5/Middleware/avnet
+cd iot-reference-stm32u5/Middleware/avnet
 git clone https://github.com/avnet-iotconnect/iotc-freertos-reference-sdk-stm32u5.git --recurse-submodules
 ```
 - Snure that HTTP dependencies are pulled (TODO)
