@@ -59,12 +59,13 @@ and ensure that the following directories are added to include paths:
 /// Add to headers:
 #include "iotconnect_sync.h"
 /// Modify prvConfigureAgentTaskCtx()
-        pxCtx->xConnectInfo.userNameLength = strlen(iotc_sync_get_username());
+        pxCtx->xConnectInfo.pUserName = iotc_sync_get_username();
+        pxCtx->xConnectInfo.userNameLength = (uint16_t) strlen(iotc_sync_get_username());
         pxCtx->xConnectInfo.pPassword = NULL;
         pxCtx->xConnectInfo.passwordLength = 0U;
 
         pxCtx->xConnectInfo.pClientIdentifier = iotc_sync_get_client_id();
-        pxCtx->xConnectInfo.clientIdentifierLength = strlen(totc_sync_get_client_id());
+        uxTempSize = trlen(iotc_sync_get_client_id());
 
         if( ( pxCtx->xConnectInfo.pClientIdentifier != NULL ) &&
             ( uxTempSize > 0 ) &&
